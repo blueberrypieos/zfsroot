@@ -1,0 +1,6 @@
+zfsroot (1) blueberry-pie-os; urgency=medium
+
+  * Initial release: pie-root-setup, pie-data-setup, pie-stage, pie-seal,
+    pie-unseal, softreboot, pie-boot and pie-data.
+
+ -- Maxwell <maxwell@blueberrypieos.com>  Mon, 16 Nov 2026 20:22:39 +0000

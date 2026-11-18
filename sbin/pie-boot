@@ -1,0 +1,192 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 The Blueberry Pie OS Authors
+#
+# usage: pie-boot [status]
+#        pie-boot list
+#        pie-boot set ROOT
+#        pie-boot rollback [-n] [ROOT|SNAPSHOT]
+#        pie-boot gc [-k COUNT]
+#
+# status shows the running root and data set, the pool's bootfs (the root
+# a reboot starts), the next root for softreboot and the stage.
+#
+# list shows the roots and their snapshots.
+#
+# set makes ROOT the root of the next soft reboot or, if its kernel set
+# differs from the running kernel's, of the next reboot: it updates the
+# boot partition from ROOT and makes it the bootfs. set with the running
+# root makes it the bootfs again, with its kernel on the boot partition.
+#
+# rollback goes back to the root as it was before the last apt run on a
+# read-write root (ROOT@pre-TIME), or to the root the running root came
+# from (its pie:parent) on a sealed one, or to the ROOT or SNAPSHOT given.
+# A snapshot becomes a new root. Then it runs softreboot, or says to
+# reboot; -n only sets the root.
+#
+# gc destroys the roots that are not running, staged, next or the bootfs,
+# and the seal, unseal and stage snapshots that no root comes from, and
+# keeps COUNT (5) pre-apt snapshots of the running root.
+
+. /usr/libexec/pie-zfsroot.sh
+
+root=$(root_ds)
+[ -n "$root" ] || die "the root is not a ZFS dataset"
+pool=${root%%/*}
+case ${1:-status} in
+set|rollback|gc) need_root; exclusive "$0" "$@" ;;
+esac
+
+name() {
+	case $1 in
+	*/*) echo "$1" ;;
+	*) echo "$pool/root/$1" ;;
+	esac
+}
+
+show() {
+	printf '%-10s %s\n' "$1" "${2:--}"
+}
+
+is_root() {
+	case $1 in
+	"$pool"/root/*/*|*@*) false ;;
+	"$pool"/root/?*) [ "$(prop type "$1")" = filesystem ] ;;
+	*) false ;;
+	esac
+}
+
+set_root() {
+	r=$1
+	ks=$(prop pie:kernelset "$r")
+	if [ "$r" = "$root" ]; then
+		if [ "$ks" != "$(pprop pie:bootkernel "$pool")" ]; then
+			boot_from "$pool" "" "$ks" || die "cannot put $r's kernel on the boot partition"
+		fi
+		zpool set bootfs="$r" "$pool" && zpool set pie:next= "$pool" || die "cannot make $r the bootfs"
+		[ "$ks" = "$(coldkernel "$pool")" ]
+		return
+	fi
+	if [ "$ks" = "$(coldkernel "$pool")" ]; then
+		zpool set pie:next="$r" "$pool" || die "cannot make $r the next root"
+		return 0
+	fi
+	tmp=$(mktemp -d /private/var/tmp/pie-boot.XXXXXX) || die "cannot make a temporary directory"
+	mount_at "$r" "$tmp" ro || { rmdir "$tmp"; die "cannot mount $r"; }
+	boot_from "$pool" "$tmp" "$ks"
+	rc=$?
+	umount "$tmp" && rmdir "$tmp"
+	[ $rc = 0 ] || die "cannot update the boot partition from $r"
+	if sealed "$r"; then
+		zfs set readonly=on "$r" || die "cannot set $r's readonly property"
+	fi
+	zpool set bootfs="$r" "$pool" && zpool set pie:next="$r" "$pool" ||
+		die "cannot make $r the bootfs"
+	return 1
+}
+
+case ${1:-status} in
+status)
+	show root "$root"
+	show sealed "$(prop pie:sealed "$root")"
+	show data "$(mount | awk '$2 == "on" && $3 == "/private/var" { print $1; exit }')"
+	show bootfs "$(pprop bootfs "$pool")"
+	show next "$(pprop pie:next "$pool")"
+	show stage "$(pprop pie:stage "$pool")"
+	if [ "$(prop pie:kernelset "$root")" != "$(coldkernel "$pool")" ]; then
+		echo "the root has another kernel than the running one; reboot to use it"
+	fi
+	;;
+list)
+	zfs list -H -o name,pie:sealed,origin,creation -s creation -d 1 -t filesystem "$pool/root" |
+		while IFS="$(printf '\t')" read -r ds s origin created; do
+		[ "$ds" = "$pool/root" ] && continue
+		mark=
+		[ "$ds" = "$root" ] && mark="$mark running"
+		[ "$ds" = "$(pprop bootfs "$pool")" ] && mark="$mark bootfs"
+		[ "$ds" = "$(pprop pie:next "$pool")" ] && mark="$mark next"
+		[ "$ds" = "$(pprop pie:stage "$pool")" ] && mark="$mark stage"
+		printf '%s  sealed=%s  from=%s  %s%s\n' "$ds" "$s" "$origin" "$created" "$mark"
+		zfs list -H -o name -s creation -t snapshot -d 1 "$ds" | sed 's/^/    /'
+	done
+	;;
+set)
+	[ $# = 2 ] || die "usage: pie-boot set ROOT"
+	r=$(name "$2")
+	is_root "$r" || die "$r is not a root of $pool"
+	if set_root "$r"; then
+		if [ "$r" = "$root" ]; then
+			echo "${0##*/}: $r is the running root and the bootfs"
+		else
+			echo "${0##*/}: $r is the next root; softreboot to use it"
+		fi
+	elif [ "$r" = "$root" ]; then
+		echo "${0##*/}: $r is the bootfs; it has another kernel than the running one, so reboot to use it"
+	else
+		echo "${0##*/}: $r has another kernel; reboot to use it"
+	fi
+	;;
+rollback)
+	shift
+	now=1
+	[ "${1:-}" = -n ] && { now=; shift; }
+	if [ $# -gt 0 ]; then
+		r=$(name "$1")
+	elif sealed "$root"; then
+		r=$(prop pie:parent "$root")
+		[ -n "$r" ] && [ "$r" != - ] || die "$root has no parent root"
+	else
+		r=$(zfs list -H -o name -s creation -t snapshot -d 1 "$root" | grep '@pre-' | tail -n 1)
+		[ -n "$r" ] || die "$root has no pre-apt snapshot"
+	fi
+	exists "$r" || die "no root or snapshot $r"
+	is_root "${r%@*}" || die "$r is not a root of $pool or its snapshot"
+	case $r in
+	*@*)
+		new=$(next_root "$pool")
+		make_root "$r" "$new" "$(prop pie:sealed "${r%@*}")" || die "cannot make $new from $r"
+		r=$new
+		;;
+	esac
+	if set_root "$r"; then
+		echo "${0##*/}: rolling back to $r"
+		[ -n "$now" ] && exec /usr/sbin/softreboot -r "$r"
+	else
+		echo "${0##*/}: $r has another kernel; reboot to roll back"
+	fi
+	exit 0
+	;;
+gc)
+	keep=5
+	[ "${2:-}" = -k ] && keep=${3:-5}
+	case $keep in *[!0-9]*|"") die "usage: pie-boot gc [-k COUNT]" ;; esac
+	pre=$(zfs list -H -o name -s creation -t snapshot -d 1 "$root" | grep '@pre-')
+	n=$(echo "$pre" | grep -c .)
+	if [ "$n" -gt "$keep" ]; then
+		echo "$pre" | head -n $(( n - keep )) | while read -r s; do
+			[ -n "$(prop clones "$s" | tr -d -)" ] || zfs destroy "$s"
+		done
+	fi
+	held="$root $(pprop bootfs "$pool") $(pprop pie:next "$pool") $(pprop pie:stage "$pool")"
+	zfs list -H -o name -s creation -d 1 -t filesystem "$pool/root" | while read -r ds; do
+		[ "$ds" = "$pool/root" ] && continue
+		case " $held " in *" $ds "*) continue ;; esac
+		for s in $(zfs list -H -o name -t snapshot -d 1 "$ds"); do
+			for c in $(prop clones "$s" | tr , ' '); do
+				[ "$c" = - ] || zfs promote "$c"
+			done
+		done
+		zfs destroy -r "$ds" && echo "${0##*/}: destroyed $ds"
+	done
+	zfs list -H -o name -d 1 -t filesystem "$pool/root" | while read -r ds; do
+		[ "$ds" = "$pool/root" ] && continue
+		zfs list -H -o name -t snapshot -d 1 "$ds" | grep -E '@(seal|unseal|stage)-' | while read -r s; do
+			[ -n "$(prop clones "$s" | tr -d -)" ] || zfs destroy "$s"
+		done
+	done
+	;;
+*)
+	sed -n 's/^# usage: /usage: /p; s/^#        /       /p' "$0" | head -n 5 >&2
+	exit 2
+	;;
+esac

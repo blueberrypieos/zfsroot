@@ -1,0 +1,86 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 The Blueberry Pie OS Authors
+#
+# usage: pie-seal
+#        pie-unseal [-f]
+#
+# pie-seal makes a sealed copy of the running root, from a snapshot of it,
+# as the root for the next soft reboot. A sealed root is read-only: apt
+# installs into a stage on /System/Volumes/Update, and softreboot moves
+# onto it. pie-unseal does the opposite: the next root is read-write, and
+# apt updates it in place. Neither changes the running root. pie-unseal
+# refuses while the stage holds changes not yet booted, unless given -f,
+# which drops them.
+
+. /usr/libexec/pie-zfsroot.sh
+
+need_root
+exclusive "$0" "$@"
+root=$(root_ds)
+[ -n "$root" ] || die "the root is not a ZFS dataset"
+pool=${root%%/*}
+case ${0##*/} in
+pie-unseal) want=off word=unsealed ;;
+*) want=on word=sealed ;;
+esac
+force=
+[ "${1:-}" = -f ] && [ $want = off ] && force=1
+
+next=$(pprop pie:next "$pool")
+if [ -n "$next" ] && [ "$next" != "$root" ] && [ "$(prop pie:sealed "$next")" = $want ]; then
+	echo "${0##*/}: $next is already the next root, $word"
+	exit 0
+fi
+if [ "$(prop pie:sealed "$root")" = $want ] && { [ -z "$next" ] || [ "$next" = "$root" ]; }; then
+	echo "${0##*/}: the root is already $word"
+	exit 0
+fi
+
+stage=$(pprop pie:stage "$pool")
+if [ $want = off ] && [ -n "$stage" ] && [ "$stage" = "$(pprop bootfs "$pool")" ]; then
+	die "the stage $stage has a new kernel and is the bootfs; reboot to use it, or pie-boot set $root to drop it"
+fi
+if [ $want = off ] && [ -n "$stage" ] && exists "$stage" && [ -z "$force" ] &&
+	{ [ "$next" = "$stage" ] || [ "$(prop pie:dirty "$stage")" = on ]; }; then
+	die "the stage $stage holds changes not yet booted; softreboot first, or pie-unseal -f to drop them"
+fi
+
+snap=$root@$( [ $want = on ] && echo seal || echo unseal )-$(stamp)
+new=$(next_root "$pool")
+zfs snapshot "$snap" || die "cannot snapshot $root"
+make_root "$snap" "$new" $want || die "cannot make $new from $snap"
+tmp=$(mktemp -d /private/var/tmp/pie-seal.XXXXXX) || { zfs destroy "$new"; die "cannot make a temporary directory"; }
+if ! mount_at "$new" "$tmp"; then
+	rmdir "$tmp"
+	zfs destroy "$new"
+	die "cannot mount $new"
+fi
+conf=$tmp/private/etc/apt/apt.conf.d/50pie-stage
+ok=1
+if [ $want = on ]; then
+	cat > "$conf" <<EOF || ok=
+Dir::State::status "$UPDATE$ADMIN/status";
+Dir::State::extended_states "$UPDATE/usr/lib/blueberry-pie-os/apt/extended_states";
+DPkg::Options { "--root=$UPDATE"; "--admindir=$UPDATE$ADMIN"; "--force-script-chrootless"; };
+EOF
+else
+	rm -f "$conf" || ok=
+fi
+umount "$tmp" && rmdir "$tmp" || ok=
+if [ -z "$ok" ] || ! zfs set readonly=$want "$new"; then
+	zfs destroy "$new"
+	die "cannot prepare $new"
+fi
+how=softreboot
+[ "$(prop pie:kernelset "$new")" = "$(coldkernel "$pool")" ] || how=reboot
+if ! /usr/sbin/pie-boot set "$new" > /dev/null; then
+	[ "$(pprop bootfs "$pool")" = "$new" ] || zfs destroy "$new"
+	die "cannot make $new the next root"
+fi
+if [ $want = off ] && [ -n "$stage" ] && exists "$stage" && [ "$stage" != "$(pprop bootfs "$pool")" ]; then
+	umount "$UPDATE" 2>/dev/null || umount -f "$UPDATE" 2>/dev/null
+	zpool set pie:stage= "$pool"
+	zfs destroy -r "$stage" || echo "${0##*/}: $stage stays until pie-boot gc" >&2
+fi
+echo "${0##*/}: $new is $word; $how to use it"

@@ -1,0 +1,169 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 The Blueberry Pie OS Authors
+#
+# usage: pie-root-setup boot|softboot
+#        pie-root-setup rc STATUS boot|softboot
+#
+# init runs it before /etc/rc, and again once /etc/rc exits with STATUS
+# (init gives a nonzero STATUS if this setup failed). Before /etc/rc it
+# finishes the pool on its first boot, mounts the data set named by the
+# pool's pie:data property (POOL/data/default if unset), makes the data
+# set's directories with pie-data-setup and, on a sealed root, mounts the
+# stage on /System/Volumes/Update. A data set whose own mountpoint is not
+# /private/var cannot be mounted. If the data set cannot be mounted, the
+# one the last boot mounted, named by the pool's pie:lastdata, is mounted
+# instead and becomes pie:data again. It exits nonzero if no data set can
+# be mounted, or if the data set cannot be set up. After a soft reboot
+# onto another root, STATUS 0 makes that root the pool's bootfs, with its
+# kernel on the boot partition; any other status goes back to the bootfs
+# with softreboot, or with a reboot if softreboot cannot run.
+
+. /usr/libexec/pie-zfsroot.sh
+
+root=$(root_ds)
+[ -n "$root" ] || exit 0
+pool=${root%%/*}
+
+first_boot() {
+	[ "$(pprop pie:setup "$pool")" = done ] && return 0
+	ok=1
+	if [ "$(pprop compatibility "$pool")" != openzfs-2.4 ]; then
+		zpool set compatibility=openzfs-2.4 "$pool" || ok=
+	fi
+	zpool upgrade "$pool" > /dev/null || ok=
+	zfs set compression=lz4 "$pool" && zfs set atime=off "$pool" || ok=
+	list=$(zfs list -H -o name -r -t filesystem "$pool/root" "$pool/data") && [ -n "$list" ] || ok=
+	for ds in $list; do
+		case $ds in
+		"$pool/root"|"$pool/data") ;;
+		*) zfs set canmount=noauto "$ds" || ok= ;;
+		esac
+	done
+	if v=$(prop pie:sealed "$root"); then
+		[ "$v" = - ] && { zfs set pie:sealed=off "$root" || ok=; }
+	else
+		ok=
+	fi
+	if v=$(prop pie:kernelset "$root"); then
+		if [ "$v" = - ]; then
+			ks=$(kernelset /) && [ -n "$ks" ] && zfs set pie:kernelset="$ks" "$root" || ok=
+		fi
+	else
+		ok=
+	fi
+	vdevs=$(zpool list -H -P -v -o name "$pool") || { vdevs=; ok=; }
+	for vdev in $(printf '%s\n' "$vdevs" | awk 'NR == 1 { next } $1 == "cache" || $1 == "spare" { s = 1; next } $1 == "dedup" || $1 == "special" || $1 == "logs" { s = 0; next } !s && $1 ~ "^/dev/" { print $1 }'); do
+		case $vdev in
+		/dev/disk*s[1-4])
+			/usr/libexec/pie-grow-partition "/dev/r$(basename "${vdev%s[1-4]}")" "${vdev##*s}"
+			case $? in
+			0|1) ;;
+			*) ok=; continue ;;
+			esac
+			;;
+		esac
+		zpool online -e "$pool" "$vdev" || ok=
+	done
+	if [ -n "$ok" ]; then
+		zpool set pie:setup=done "$pool"
+	else
+		echo "${0##*/}: the pool's first-boot setup failed; it is tried again at the next boot" >&2
+	fi
+}
+
+unmount_data() {
+	mount | awk -v d="$1" '$2 == "on" && ($1 == d || index($1, d "/") == 1) { print $3 }' | sort -r |
+		while read -r m; do
+			umount "$m" || exit 1
+		done
+}
+
+ensure_stage() {
+	stage=$(pprop pie:stage "$pool")
+	if [ -n "$stage" ] && [ "$stage" != "$root" ] && exists "$stage" &&
+		case $(prop origin "$stage") in "$root"@*) true ;; *) false ;; esac; then
+		:
+	else
+		snap=$root@stage-$(stamp)
+		stage=$(next_root "$pool")
+		zfs snapshot "$snap" && make_root "$snap" "$stage" on &&
+			zpool set pie:stage="$stage" "$pool" || {
+			echo "${0##*/}: cannot make a stage from $root" >&2
+			return 1
+		}
+	fi
+	mount_at "$stage" "$UPDATE"
+}
+
+case ${1:-} in
+boot|softboot)
+	first_boot
+	data=$(pprop pie:data "$pool")
+	[ -n "$data" ] || data=$pool/data/default
+	if ! mount_data "$data" ""; then
+		last=$(pprop pie:lastdata "$pool")
+		if [ -z "$last" ] || [ "$last" = "$data" ]; then
+			echo "${0##*/}: cannot mount the data set $data" >&2
+			exit 1
+		fi
+		echo "${0##*/}: cannot mount the data set $data; going back to $last" >&2
+		if ! unmount_data "$data" || ! mount_data "$last" ""; then
+			echo "${0##*/}: cannot mount the data set $last" >&2
+			exit 1
+		fi
+		data=$last
+		zpool set pie:data="$data" "$pool" ||
+			echo "${0##*/}: cannot make $data the pool's data set" >&2
+	fi
+	if [ "$(pprop pie:lastdata "$pool")" != "$data" ] && ! zpool set pie:lastdata="$data" "$pool"; then
+		echo "${0##*/}: cannot record $data as the data set to go back to" >&2
+	fi
+	/usr/libexec/pie-data-setup || exit 1
+	if sealed "$root"; then
+		ensure_stage
+	fi
+	if [ "$1" = boot ]; then
+		bk=$(pprop pie:bootkernel "$pool")
+		if [ -z "$bk" ]; then
+			bk=$(prop pie:kernelset "$root")
+			zpool set pie:bootkernel="$bk" "$pool"
+		fi
+		bt=$(bootid)
+		if [ -z "$bt" ] || ! zpool set pie:coldkernel="$bk" "$pool" ||
+			! zpool set pie:coldboot="$bt" "$pool"; then
+			zpool set pie:coldboot= "$pool"
+			echo "${0##*/}: cannot record the running kernel; softreboot refuses until a reboot" >&2
+			exit 1
+		fi
+		[ "$bk" = "$(prop pie:kernelset "$root")" ] ||
+			echo "${0##*/}: the boot partition's kernel is not $root's; pie-boot set $root puts $root's there" >&2
+	fi
+	;;
+rc)
+	[ "${3:-}" = softboot ] || exit 0
+	[ "${2:-}" = 0 ] && serialize "$0" "$@"
+	bootfs=$(pprop bootfs "$pool")
+	[ "$root" != "$bootfs" ] || exit 0
+	if [ "${2:-}" = 0 ]; then
+		ks=$(prop pie:kernelset "$root")
+		if [ "$ks" != "$(pprop pie:bootkernel "$pool")" ] && ! boot_from "$pool" "" "$ks"; then
+			echo "${0##*/}: cannot put $root's kernel on the boot partition; a reboot starts $bootfs" >&2
+			exit 1
+		fi
+		zpool set bootfs="$root" "$pool" || exit 1
+		[ "$(pprop pie:next "$pool")" = "$root" ] && zpool set pie:next= "$pool"
+		echo "${0##*/}: $root is the root from now on"
+	else
+		echo "${0##*/}: the boot failed on $root; going back to $bootfs" >&2
+		if [ -z "$bootfs" ] || ! /usr/sbin/softreboot -r "$bootfs"; then
+			exec reboot
+		fi
+	fi
+	;;
+*)
+	echo "usage: ${0##*/} boot|softboot | rc STATUS boot|softboot" >&2
+	exit 2
+	;;
+esac
+exit 0

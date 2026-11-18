@@ -1,0 +1,7 @@
+path-exclude=/private/var/*
+path-exclude=/private/tmp/*
+path-exclude=/Users/*
+path-exclude=/Volumes/*
+path-exclude=/cores/*
+path-exclude=/usr/local/*
+post-invoke=/usr/libexec/pie-data-setup

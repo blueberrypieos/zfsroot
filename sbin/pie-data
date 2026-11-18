@@ -1,0 +1,194 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 The Blueberry Pie OS Authors
+#
+# usage: pie-data list
+#        pie-data create NAME -u USER [-n REALNAME] [-p]
+#        pie-data snapshot [NAME] [SNAPSHOT]
+#        pie-data clone NAME@SNAPSHOT NEWNAME
+#        pie-data set NAME
+#        pie-data destroy NAME
+#
+# A data set, POOL/data/NAME, holds what a system writes: /private/var,
+# /private/tmp, /Users, /Volumes, /cores and /usr/local. The root holds
+# everything packages install. Any data set runs on any root: at boot, the
+# directories the installed packages need are made in it.
+#
+# create makes an empty data set whose administrator is USER (uid 501, in
+# the admin, staff and wheel groups), with a home directory. It asks for
+# the password twice; -p reads it from standard input instead.
+#
+# snapshot snapshots a data set (the running one by default) with its
+# children; clone makes a data set from such a snapshot.
+#
+# set makes NAME the data set of the next boot or soft reboot; softreboot
+# -d NAME does both at once. If NAME cannot be mounted, the boot goes back
+# to the data set that ran before.
+
+. /usr/libexec/pie-zfsroot.sh
+
+root=$(root_ds)
+[ -n "$root" ] || die "the root is not a ZFS dataset"
+pool=${root%%/*}
+TEMPLATES=/usr/share/base-files/dslocal
+
+current() {
+	mount | awk '$2 == "on" && $3 == "/private/var" { print $1; exit }'
+}
+
+unmount_tree() {
+	mount | awk -v t="$1" '$2 == "on" && index($3, t) == 1 { print $3 }' | sort -r | while read -r m; do
+		umount "$m"
+	done
+	find "$1" -xdev -depth -type d -empty -exec rmdir {} \; 2>/dev/null
+}
+
+ask_password() {
+	if [ -n "$from_stdin" ]; then
+		IFS= read -r pw || die "no password on standard input"
+		return
+	fi
+	stty -echo 2>/dev/null
+	printf 'Password for %s: ' "$user" >&2
+	IFS= read -r pw
+	printf '\nAgain: ' >&2
+	IFS= read -r pw2
+	stty echo 2>/dev/null
+	echo >&2
+	[ "$pw" = "$pw2" ] || die "the passwords differ"
+}
+
+case ${1:-} in
+create) need_root ;;
+snapshot|clone|set|destroy) need_root; serialize "$0" "$@" ;;
+esac
+
+data_name() {
+	case $1 in
+	""|*/*|.*|*[!A-Za-z0-9_.:-]*) die "$1 is not a data set name" ;;
+	esac
+	echo "$pool/data/$1"
+}
+
+case ${1:-} in
+list)
+	cur=$(current)
+	next=$(pprop pie:data "$pool")
+	zfs list -H -o name,used,creation -d 1 -t filesystem "$pool/data" | while IFS="$(printf '\t')" read -r ds used created; do
+		[ "$ds" = "$pool/data" ] && continue
+		mark=
+		[ "$ds" = "$cur" ] && mark="$mark running"
+		[ "$ds" = "${next:-$pool/data/default}" ] && mark="$mark next"
+		printf '%s  %s  %s%s\n' "$ds" "$used" "$created" "$mark"
+	done
+	;;
+create)
+	shift
+	[ $# -ge 1 ] || die "usage: pie-data create NAME -u USER [-n REALNAME] [-p]"
+	ds=$(data_name "$1") || exit 1
+	shift
+	user= realname= from_stdin=
+	while getopts u:n:p opt; do
+		case $opt in
+		u) user=$OPTARG ;;
+		n) realname=$OPTARG ;;
+		p) from_stdin=1 ;;
+		*) die "usage: pie-data create NAME -u USER [-n REALNAME] [-p]" ;;
+		esac
+	done
+	[ -n "$user" ] || die "usage: pie-data create NAME -u USER [-n REALNAME] [-p]"
+	case $user in
+	[a-z_]*) ;;
+	*) die "a user name starts with a lower-case letter or _" ;;
+	esac
+	case $user in *[!a-z0-9_.-]*) die "a user name has only a-z, 0-9, _, . and -" ;; esac
+	[ -e "$TEMPLATES/users/$user.plist" ] && die "$user is a system account"
+	[ -e "$TEMPLATES/groups/$user.plist" ] && die "$user is a system group"
+	exists "$ds" && die "$ds exists"
+	[ -n "$realname" ] || realname=$user
+	ask_password
+	if [ -z "${PIE_ZFSROOT_LOCKED:-}" ]; then
+		printf '%s\n' "$pw" | serialize "$0" create "${ds##*/}" -u "$user" -n "$realname" -p
+		exit
+	fi
+	zfs create -p -o canmount=noauto -o mountpoint=/private/var "$ds" || die "cannot make $ds"
+	t=
+	trap 'if [ -n "$t" ]; then unmount_tree "$t"; fi; zfs destroy -r "$ds"' EXIT
+	for c in tmp:/private/tmp Users:/Users Volumes:/Volumes cores:/cores local:/usr/local; do
+		zfs create -o canmount=noauto -o mountpoint="${c#*:}" "$ds/${c%%:*}" ||
+			die "cannot make $ds/${c%%:*}"
+	done
+	t=$(mktemp -d /private/var/tmp/pie-data.XXXXXX) || die "cannot make a temporary directory"
+	mount_data "$ds" "$t" || die "cannot mount $ds"
+	if ! chmod 1777 "$t/private/tmp" || ! /usr/libexec/pie-data-setup -r "$t"; then
+		die "cannot set up $ds"
+	fi
+	node=$t/private/var/db/dslocal/nodes/Default
+	install -d -m 755 "$t/private/var/db" &&
+		install -d -m 700 "$t/private/var/db/dslocal" "$t/private/var/db/dslocal/nodes" "$node" \
+		"$node/users" "$node/groups" || die "cannot make the directory node in $ds"
+	for kind in users groups; do
+		for f in "$TEMPLATES/$kind"/*.plist; do
+			if [ -e "$f" ]; then
+				install -m 600 "$f" "$node/$kind/" || die "cannot install $f in $ds"
+			fi
+		done
+	done
+	ok=1
+	dscl -f "$node" -create "/Users/$user" UniqueID 501 &&
+		dscl -f "$node" -create "/Users/$user" PrimaryGroupID 20 &&
+		dscl -f "$node" -create "/Users/$user" RealName "$realname" &&
+		dscl -f "$node" -create "/Users/$user" NFSHomeDirectory "/Users/$user" &&
+		dscl -f "$node" -create "/Users/$user" UserShell /bin/sh &&
+		printf '%s\n' "$pw" | dscl -f "$node" -passwd "/Users/$user" || ok=
+	for g in admin staff wheel; do
+		[ -n "$ok" ] && { dscl -f "$node" -append "/Groups/$g" GroupMembership "$user" || ok=; }
+	done
+	[ -n "$ok" ] || die "cannot make the user $user"
+	install -d -m 755 -o 501 -g 20 "$t/Users/$user" || die "cannot make /Users/$user in $ds"
+	trap - EXIT
+	unmount_tree "$t"
+	echo "${0##*/}: made $ds for $user; pie-data set ${ds##*/}, or softreboot -d ${ds##*/}"
+	;;
+snapshot)
+	ds=$(current)
+	if [ -n "${2:-}" ]; then
+		ds=$(data_name "$2") || exit 1
+	fi
+	exists "$ds" || die "no data set $ds"
+	snap=$ds@${3:-$(stamp)}
+	zfs snapshot -r "$snap" && echo "${0##*/}: $snap"
+	;;
+clone)
+	[ $# = 3 ] || die "usage: pie-data clone NAME@SNAPSHOT NEWNAME"
+	src=$(data_name "${2%@*}") && dst=$(data_name "$3") || exit 1
+	snap=${2#*@}
+	exists "$src@$snap" || die "no snapshot $src@$snap"
+	exists "$dst" && die "$dst exists"
+	list=$(zfs list -H -o name,mountpoint -r -t filesystem "$src") && [ -n "$list" ] ||
+		die "cannot list $src"
+	echo "$list" | while read -r d mp; do
+		zfs clone -o canmount=noauto -o mountpoint="$mp" "$d@$snap" "$dst${d#"$src"}" || exit 1
+	done || die "cannot clone $src@$snap"
+	echo "${0##*/}: made $dst from $src@$snap"
+	;;
+set)
+	[ $# = 2 ] || die "usage: pie-data set NAME"
+	ds=$(data_name "$2") || exit 1
+	exists "$ds" || die "no data set $ds"
+	zpool set pie:data="$ds" "$pool" && echo "${0##*/}: $ds is the data set from the next boot or soft reboot"
+	;;
+destroy)
+	[ $# = 2 ] || die "usage: pie-data destroy NAME"
+	ds=$(data_name "$2") || exit 1
+	exists "$ds" || die "no data set $ds"
+	[ "$ds" = "$(current)" ] && die "$ds is running"
+	[ "$ds" = "$(pprop pie:data "$pool")" ] && die "$ds is the next data set"
+	[ "$ds" = "$(pprop pie:lastdata "$pool")" ] && die "$ds is the data set a boot goes back to"
+	zfs destroy -r "$ds"
+	;;
+*)
+	sed -n 's/^# usage: /usage: /p; s/^#        /       /p' "$0" | head -n 6 >&2
+	exit 2
+	;;
+esac

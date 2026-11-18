@@ -1,0 +1,23 @@
+Source: zfsroot
+Section: admin
+Priority: optional
+Maintainer: Maxwell <maxwell@blueberrypieos.com>
+Build-Depends: pietoolchain (>= 0.1.0)
+Standards-Version: 4.7.3
+Homepage: https://github.com/blueberrypieos/zfsroot
+Vcs-Git: https://github.com/blueberrypieos/zfsroot.git
+Vcs-Browser: https://github.com/blueberrypieos/zfsroot
+Rules-Requires-Root: no
+
+Package: pie-zfsroot
+Architecture: darwin-arm64
+Depends: libsystem, zfs (>= 2.4.1p1+ds1-2), blueberry-pie-os-init (>= 5),
+ opendirectoryd (>= 3), rpi-firmware (>= 1.20260521+git20260601.12eeaa1+ds1-2)
+Description: ZFS root and data sets, sealing and soft reboots
+ The tools for a system whose root is a ZFS dataset: pie-root-setup,
+ which init runs at boot to mount the data set, pie-seal and pie-unseal,
+ pie-stage, softreboot, pie-boot and pie-data.
+ .
+ The root holds everything packages install. dpkg leaves out /private/var,
+ /private/tmp, /Users, /Volumes, /cores and /usr/local, which are the data
+ set, and keeps its database in the root.

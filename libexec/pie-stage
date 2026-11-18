@@ -1,0 +1,122 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 The Blueberry Pie OS Authors
+#
+# usage: pie-stage pre|post
+#        pie-stage commit
+#        pie-stage run COMMAND [ARGUMENT ...]
+#
+# pre and post are apt's hooks around each dpkg run. On a read-write
+# root, pre snapshots the root as ROOT@pre-TIME if it changed since its
+# last snapshot, for pie-boot rollback, and post records the root's kernel
+# set. On a sealed root, dpkg installs into the stage on
+# /System/Volumes/Update, and post commits it.
+#
+# commit makes the stage the root for the next soft reboot. If its kernel
+# set differs from the running kernel's, it updates the boot partition from
+# the stage and makes the stage the pool's bootfs, for the next reboot.
+# post does not commit a stage in which dpkg left packages unfinished, and
+# pre refuses while the stage holds a new kernel.
+#
+# run runs COMMAND with the stage as its root directory, then commits it:
+# pie-stage run vi /etc/hostname.
+
+. /usr/libexec/pie-zfsroot.sh
+
+need_root
+case ${1:-} in
+commit|run) exclusive "$0" "$@" ;;
+*) serialize "$0" "$@" ;;
+esac
+root=$(root_ds)
+[ -n "$root" ] || exit 0
+pool=${root%%/*}
+
+stage_mounted() {
+	mount | awk -v u="$UPDATE" '$2 == "on" && $3 == u { found = 1 } END { exit !found }'
+}
+
+commit() {
+	stage=$(pprop pie:stage "$pool")
+	[ -n "$stage" ] && stage_mounted || die "there is no stage on $UPDATE"
+	if [ -x "$UPDATE/usr/libexec/makewhatis" ]; then
+		"$UPDATE/usr/libexec/makewhatis" "$UPDATE/usr/share/man" 2>/dev/null
+	fi
+	ks=$(kernelset "$UPDATE")
+	[ -n "$ks" ] || die "cannot read the stage's kernel set"
+	zfs set pie:kernelset="$ks" "$stage" && zfs set pie:parent="$root" "$stage" ||
+		die "cannot record $stage's properties"
+	if [ "$ks" != "$(coldkernel "$pool")" ]; then
+		boot_from "$pool" "$UPDATE" "$ks" ||
+			die "cannot update the boot partition from $stage; nothing switched"
+		zfs set readonly=on "$stage" && zpool set bootfs="$stage" "$pool" &&
+			zpool set pie:next="$stage" "$pool" || die "cannot make $stage the bootfs"
+		echo "${0##*/}: $stage has a new kernel; reboot to use it"
+	else
+		zpool set pie:next="$stage" "$pool" || die "cannot make $stage the next root"
+		echo "${0##*/}: $stage is staged; softreboot to use it"
+	fi
+	zfs inherit pie:dirty "$stage"
+}
+
+dirty() {
+	stage=$(pprop pie:stage "$pool")
+	[ -n "$stage" ] && zfs set pie:dirty=on "$stage" || die "cannot mark the stage as changed"
+}
+
+case ${1:-} in
+pre)
+	if sealed "$root"; then
+		stage_mounted || die "there is no stage on $UPDATE; reboot or softreboot first"
+		stage=$(pprop pie:stage "$pool")
+		if [ "$(prop readonly "$stage")" = on ] || [ "$stage" = "$(pprop bootfs "$pool")" ]; then
+			die "the stage $stage has a new kernel; reboot to use it first"
+		fi
+		dirty
+	else
+		next=$(pprop pie:next "$pool")
+		if [ -n "$next" ] && [ "$next" != "$root" ]; then
+			die "$next is the next root, and changes to $root would not reach it; softreboot first, or pie-boot set $root"
+		fi
+		if [ "$(prop written "$root")" != 0 ] ||
+			[ -z "$(zfs list -H -o name -t snapshot -d 1 "$root" 2>/dev/null)" ]; then
+			zfs snapshot "$root@pre-$(stamp)" || die "cannot snapshot $root"
+		fi
+	fi
+	;;
+post)
+	if sealed "$root"; then
+		if [ -n "$(dpkg --admindir="$UPDATE$ADMIN" --audit 2>&1)" ]; then
+			die "dpkg left packages unfinished in the stage; finish them with apt, then pie-stage commit"
+		fi
+		commit
+	else
+		ks=$(kernelset /)
+		[ -n "$ks" ] && zfs set pie:kernelset="$ks" "$root" || die "cannot record the root's kernel set"
+		if [ "$root" = "$(pprop bootfs "$pool")" ] && [ "$ks" != "$(pprop pie:bootkernel "$pool")" ]; then
+			boot_from "$pool" "" "$ks" || die "cannot put $root's kernel on the boot partition"
+		fi
+	fi
+	;;
+commit)
+	sealed "$root" || die "the root is not sealed; apt updates it in place"
+	commit
+	;;
+run)
+	sealed "$root" || die "the root is not sealed; change it in place"
+	shift
+	[ $# -gt 0 ] || die "usage: pie-stage run COMMAND [ARGUMENT ...]"
+	stage_mounted || die "there is no stage on $UPDATE"
+	dirty
+	mount -t devfs devfs "$UPDATE/dev" || die "cannot mount devfs on $UPDATE/dev"
+	chroot "$UPDATE" "$@"
+	rc=$?
+	umount "$UPDATE/dev"
+	[ $rc = 0 ] || die "$1 exited with status $rc; nothing committed"
+	commit
+	;;
+*)
+	echo "usage: ${0##*/} pre|post | commit | run COMMAND [ARGUMENT ...]" >&2
+	exit 2
+	;;
+esac
