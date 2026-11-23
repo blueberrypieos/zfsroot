@@ -1,3 +1,16 @@
+zfsroot (2) blueberry-pie-os; urgency=medium
+
+  * First boot zeroes the end of the partition it grows before it grows
+    the pool, so the labels of a pool that once filled the card are not
+    taken for the new pool's. A card that had run an earlier pool stopped
+    responding at its first boot, and the next boot could not import its
+    root. A partition that would grow too little for that end to be
+    cleared is left as it is.
+  * First boot tries again to grow the partition at the next boot when
+    reading or writing the card failed.
+
+ -- Maxwell <maxwell@blueberrypieos.com>  Wed, 18 Nov 2026 16:22:28 +0000
+
 zfsroot (1) blueberry-pie-os; urgency=medium
 
   * Initial release: pie-root-setup, pie-data-setup, pie-stage, pie-seal,
