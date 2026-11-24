@@ -1,3 +1,9 @@
+zfsroot (3) blueberry-pie-os; urgency=medium
+
+  * Build-Depend on pietoolchain-host and pietoolchain-sdk.
+
+ -- Maxwell <maxwell@blueberrypieos.com>  Tue, 24 Nov 2026 17:07:44 +0000
+
 zfsroot (2) blueberry-pie-os; urgency=medium
 
   * First boot zeroes the end of the partition it grows before it grows
