@@ -1,3 +1,13 @@
+zfsroot (4) blueberry-pie-os; urgency=medium
+
+  * First boot keeps the card's last MiB out of the partition it grows. On
+    a card with the GPT that the RG353V's eMMC loader needs, it writes the
+    GPT's backup there and points the GPT's header at it. A card with any
+    other GPT is left as it is. If an interrupted first boot left that GPT
+    damaged, the next one rebuilds it from the backup.
+
+ -- Maxwell <maxwell@blueberrypieos.com>  Wed, 25 Nov 2026 00:51:39 +0000
+
 zfsroot (3) blueberry-pie-os; urgency=medium
 
   * Build-Depend on pietoolchain-host and pietoolchain-sdk.
