@@ -16,9 +16,9 @@
 . /usr/libexec/pie-zfsroot.sh
 
 need_root
-exclusive "$0" "$@"
 root=$(root_ds)
 [ -n "$root" ] || die "the root is not a ZFS dataset"
+exclusive "$0" "$@"
 pool=${root%%/*}
 case ${0##*/} in
 pie-unseal) want=off word=unsealed ;;

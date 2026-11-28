@@ -12,7 +12,7 @@ $(OBJ)/%: $(OBJ)/%.o
 	$(CC) $(BASE_LDFLAGS) $< -o $@
 
 install: check $(OBJ)/pie-userreboot $(OBJ)/pie-mount $(OBJ)/pie-dpkg-lock $(OBJ)/pie-grow-partition $(OBJ)/pie-data-directories
-	install -d $(ROOT)/usr/sbin $(ROOT)/usr/libexec $(ROOT)/etc/dpkg/dpkg.cfg.d \
+	install -d $(ROOT)/usr/sbin $(ROOT)/usr/libexec $(ROOT)/usr/lib/blueberry-pie-os/zfs \
 		$(ROOT)/etc/apt/apt.conf.d $(ROOT)/usr/lib/blueberry-pie-os/apt \
 		$(ROOT)/usr/lib/blueberry-pie-os/data.d $(ROOT)/usr/local \
 		$(ROOT)/System/Volumes/Update $(ROOT)/System/Volumes/Next \
@@ -24,9 +24,10 @@ install: check $(OBJ)/pie-userreboot $(OBJ)/pie-mount $(OBJ)/pie-dpkg-lock $(OBJ
 		$(OBJ)/pie-userreboot $(OBJ)/pie-mount $(OBJ)/pie-dpkg-lock $(OBJ)/pie-grow-partition $(OBJ)/pie-data-directories \
 		$(ROOT)/usr/libexec/
 	install -m 644 libexec/pie-zfsroot.sh $(ROOT)/usr/libexec/
-	install -m 644 etc/dpkg/dpkg.cfg.d/pie-data $(ROOT)/etc/dpkg/dpkg.cfg.d/
+	install -m 644 lib/zfs/dpkg.cfg lib/zfs/apt.conf $(ROOT)/usr/lib/blueberry-pie-os/zfs/
 	install -m 644 etc/apt/apt.conf.d/50pie-root $(ROOT)/etc/apt/apt.conf.d/
 	install -D -m 755 debian/preinst $(ROOT)/DEBIAN/preinst
+	install -m 755 debian/postinst debian/postrm $(ROOT)/DEBIAN/
 
 check:
 	@mkdir -p $(OBJ)
@@ -36,5 +37,6 @@ check:
 	python3 tests/native-directories.py $(OBJ)/host-data-directories .
 	/usr/bin/cc -std=c11 -O2 -Wall -Wextra -Werror '-DPIE_DATA_COMPAT="$(OBJ)/compat-recorder"' libexec/pie-data-directories.c -o $(OBJ)/dispatch-directories
 	sh tests/id-dispatch.sh $(OBJ)/dispatch-directories $(OBJ)/compat-recorder
+	sh tests/hfs-root.sh .
 
 .PHONY: install check

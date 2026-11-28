@@ -1,3 +1,18 @@
+zfsroot (6) blueberry-pie-os; urgency=medium
+
+  * Install on an HFS+ root, and do nothing there.
+  * The dpkg path excludes, the data setup hook and apt's extended_states
+    move to /etc/dpkg/dpkg.cfg.d/pie-zfs and /etc/apt/apt.conf.d/40pie-zfs.
+    The package writes them only on a ZFS root, and pie-root-setup writes
+    them at boot. The old /etc/dpkg/dpkg.cfg.d/pie-data goes, and the old
+    apt hooks are guarded, before anything is unpacked.
+  * pie-data-setup does nothing on a root that is not a ZFS dataset.
+  * The apt hooks do nothing once pie-stage is removed.
+  * On HFS, pie-seal, pie-unseal and pie-stage commit and run say that
+    the root is not a ZFS dataset.
+
+ -- Maxwell <maxwell@blueberrypieos.com>  Sat, 28 Nov 2026 05:10:00 +0000
+
 zfsroot (5) blueberry-pie-os; urgency=medium
 
   * Data setup scans the package lists in one pass. One native helper makes

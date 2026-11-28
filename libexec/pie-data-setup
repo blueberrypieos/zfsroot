@@ -12,12 +12,13 @@
 # root:wheel. /private/var/lib/dpkg is made a link to the package database
 # in the root. Then each program in /usr/lib/blueberry-pie-os/data.d runs
 # with DIR as its argument. It exits nonzero if any of this fails. dpkg
-# runs it after every run; with DPKG_ROOT set (dpkg --root), it does
-# nothing.
+# runs it after every run on a ZFS root. With DPKG_ROOT set (dpkg
+# --root), or on a root that is not a ZFS dataset, it does nothing.
 
 . /usr/libexec/pie-zfsroot.sh
 
 [ -z "${DPKG_ROOT:-}" ] || exit 0
+[ -n "$(root_ds)" ] || exit 0
 dir=
 case ${1:-} in
 -r) dir=${2%/} ;;

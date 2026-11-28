@@ -18,6 +18,9 @@ export PIE_TEST_DIRECTORIES=${PIE_TEST_DIRECTORIES:-/usr/libexec/pie-data-direct
 cat > "$work/library.sh" <<'EOF'
 ADMIN=$PIE_TEST_ADMIN
 DATA_PATHS="/private/var /private/tmp /Users /Volumes /cores /usr/local"
+root_ds() {
+    echo pie/root/1
+}
 EOF
 export PIE_TEST_LIB=$work/library.sh
 export PIE_TEST_ADMIN=$work/admin

@@ -112,6 +112,15 @@ kernelset() {
 	)
 }
 
+zfs_config() {
+	for f in dpkg.cfg:etc/dpkg/dpkg.cfg.d/pie-zfs apt.conf:etc/apt/apt.conf.d/40pie-zfs; do
+		src=$1/usr/lib/blueberry-pie-os/zfs/${f%%:*} dst=$1/${f#*:}
+		[ -f "$src" ] || continue
+		cmp -s "$src" "$dst" && continue
+		mkdir -p "${dst%/*}" && cp "$src" "$dst.new" && mv -f "$dst.new" "$dst" || return 1
+	done
+}
+
 bootid() {
 	sysctl -n kern.bootsessionuuid 2>/dev/null
 }

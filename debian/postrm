@@ -1,0 +1,21 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 The Blueberry Pie OS Authors
+set -e
+r=${DPKG_ROOT:-}
+old=$r/etc/dpkg/dpkg.cfg.d/pie-data
+case $1 in
+remove)
+	rm -f "$r/etc/dpkg/dpkg.cfg.d/pie-zfs" "$r/etc/apt/apt.conf.d/40pie-zfs"
+	if [ -f "$old" ]; then
+		if [ "$(sha256sum < "$old" | cut -d ' ' -f 1)" = 492079fab165176bdf657c11b87f3eecacff82e1508e46e309f85ec607ce6d34 ]; then
+			rm -f "$old"
+		else
+			mv -f "$old" "$old.dpkg-bak"
+		fi
+	fi
+	;;
+purge)
+	rm -f "$r/etc/dpkg/dpkg.cfg.d/pie-zfs" "$r/etc/apt/apt.conf.d/40pie-zfs" "$old" "$old.dpkg-bak"
+	;;
+esac

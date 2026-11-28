@@ -1,3 +1,2 @@
-Dir::State::extended_states "/usr/lib/blueberry-pie-os/apt/extended_states";
-DPkg::Pre-Invoke { "/usr/libexec/pie-stage pre"; };
-DPkg::Post-Invoke { "/usr/libexec/pie-stage post"; };
+DPkg::Pre-Invoke { "test ! -x /usr/libexec/pie-stage || /usr/libexec/pie-stage pre"; };
+DPkg::Post-Invoke { "test ! -x /usr/libexec/pie-stage || /usr/libexec/pie-stage post"; };

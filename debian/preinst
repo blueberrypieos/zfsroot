@@ -2,8 +2,43 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026 The Blueberry Pie OS Authors
 set -e
-if [ "$1" = install ] && [ -z "${DPKG_ROOT:-}" ] &&
-	! mount | awk '$3 == "/" && $4 == "(zfs," { found = 1 } END { exit !found }'; then
-	echo "pie-zfsroot: the root is not a ZFS dataset; this package is for ZFS images" >&2
-	exit 1
-fi
+zfs_root() {
+	mount | awk -v t="${DPKG_ROOT:-/}" '$2 == "on" && $3 == t && $4 == "(zfs," { found = 1 } END { exit !found }'
+}
+put() {
+	mkdir -p "${1%/*}"
+	cat > "$1.new"
+	mv -f "$1.new" "$1"
+}
+sum() {
+	[ -f "$1" ] && sha256sum < "$1" | cut -d ' ' -f 1
+}
+case $1 in
+install|upgrade)
+	if zfs_root; then
+		put "${DPKG_ROOT:-}/etc/dpkg/dpkg.cfg.d/pie-zfs" <<'END'
+path-exclude=/private/var/*
+path-exclude=/private/tmp/*
+path-exclude=/Users/*
+path-exclude=/Volumes/*
+path-exclude=/cores/*
+path-exclude=/usr/local/*
+post-invoke=test ! -x /usr/libexec/pie-data-setup || /usr/libexec/pie-data-setup
+END
+		put "${DPKG_ROOT:-}/etc/apt/apt.conf.d/40pie-zfs" <<'END'
+Dir::State::extended_states "/usr/lib/blueberry-pie-os/apt/extended_states";
+END
+	fi
+	old=${DPKG_ROOT:-}/etc/dpkg/dpkg.cfg.d/pie-data
+	if [ "$(sum "$old")" = 492079fab165176bdf657c11b87f3eecacff82e1508e46e309f85ec607ce6d34 ]; then
+		rm -f "$old"
+	fi
+	apt=${DPKG_ROOT:-}/etc/apt/apt.conf.d/50pie-root
+	if [ "$(sum "$apt")" = c696b9929294b089625b11cbbb5e6f690edbd13370fbde60eb86405c4e91dc37 ]; then
+		put "$apt" <<'END'
+DPkg::Pre-Invoke { "test ! -x /usr/libexec/pie-stage || /usr/libexec/pie-stage pre"; };
+DPkg::Post-Invoke { "test ! -x /usr/libexec/pie-stage || /usr/libexec/pie-stage post"; };
+END
+	fi
+	;;
+esac

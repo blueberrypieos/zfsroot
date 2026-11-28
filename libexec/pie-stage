@@ -27,12 +27,17 @@
 . /usr/libexec/pie-zfsroot.sh
 
 need_root
+root=$(root_ds)
+if [ -z "$root" ]; then
+	case ${1:-} in
+	commit|run) die "the root is not a ZFS dataset" ;;
+	esac
+	exit 0
+fi
 case ${1:-} in
 commit|run) exclusive "$0" "$@" ;;
 *) serialize "$0" "$@" ;;
 esac
-root=$(root_ds)
-[ -n "$root" ] || exit 0
 pool=${root%%/*}
 
 stage_mounted() {

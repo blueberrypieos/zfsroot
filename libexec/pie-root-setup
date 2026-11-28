@@ -10,10 +10,13 @@
 # finishes the pool on its first boot, mounts the data set named by the
 # pool's pie:data property (POOL/data/default if unset), makes the data
 # set's directories with pie-data-setup and, on a sealed root, mounts the
-# stage on /System/Volumes/Update. A data set whose own mountpoint is not
-# /private/var cannot be mounted. If the data set cannot be mounted, the
-# one the last boot mounted, named by the pool's pie:lastdata, is mounted
-# instead and becomes pie:data again. It exits nonzero if no data set can
+# stage on /System/Volumes/Update. It also writes the dpkg and apt settings
+# that only a ZFS root uses, /etc/dpkg/dpkg.cfg.d/pie-zfs and
+# /etc/apt/apt.conf.d/40pie-zfs, into the root, or on a sealed root into
+# the stage. A data set whose own mountpoint is not /private/var cannot
+# be mounted. If the data set cannot be mounted, the one the last boot
+# mounted, named by the pool's pie:lastdata, is mounted instead and
+# becomes pie:data again. It exits nonzero if no data set can
 # be mounted, or if the data set cannot be set up. After a soft reboot
 # onto another root, STATUS 0 makes that root the pool's bootfs, with its
 # kernel on the boot partition; any other status goes back to the bootfs
@@ -139,9 +142,15 @@ boot|softboot)
 	if [ "$(pprop pie:lastdata "$pool")" != "$data" ] && ! zpool set pie:lastdata="$data" "$pool"; then
 		echo "${0##*/}: cannot record $data as the data set to go back to" >&2
 	fi
+	if ! sealed "$root"; then
+		zfs_config "" || echo "${0##*/}: cannot write $root's dpkg and apt settings for a ZFS root" >&2
+	fi
 	/usr/libexec/pie-data-setup || exit 1
 	if sealed "$root"; then
-		ensure_stage
+		if ensure_stage; then
+			zfs_config "$UPDATE" ||
+				echo "${0##*/}: cannot write the stage's dpkg and apt settings for a ZFS root" >&2
+		fi
 	fi
 	if [ "$1" = boot ]; then
 		ks=$(rootset "$root")

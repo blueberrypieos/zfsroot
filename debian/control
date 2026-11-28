@@ -22,3 +22,6 @@ Description: ZFS root and data sets, sealing and soft reboots
  The root holds everything packages install. dpkg leaves out /private/var,
  /private/tmp, /Users, /Volumes, /cores and /usr/local, which are the data
  set, and keeps its database in the root.
+ .
+ On a root that is not a ZFS dataset, only softreboot does anything: it
+ restarts user space.
