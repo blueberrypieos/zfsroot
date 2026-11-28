@@ -1,3 +1,25 @@
+zfsroot (5) blueberry-pie-os; urgency=medium
+
+  * Data setup scans the package lists in one pass. One native helper makes
+    the data directories and sets their owners and modes.
+  * Every update of the boot partition marks it first. After an
+    interrupted update, the next boot puts the root's boot files back once
+    /etc/rc exits, and asks for another reboot.
+  * apt updates a read-write root in place only when it is the bootfs.
+  * A root left with changes not committed has no known kernel set until
+    its set is recorded again.
+  * softreboot refuses while the boot partition is marked, when the running
+    kernel is not known, and for a root with changes not committed.
+  * pie-boot set with the running root drops a stage that is the bootfs or
+    read-only.
+  * Say that a root has a new kernel or boot files when it needs a reboot.
+  * Root snapshots carry the boot session in their names, so that two boots
+    with the same clock never pick the same name.
+  * Depends on base-files 11. Its pie-boot-partition finds the boot
+    partition on a card whose first slice is not the FAT.
+
+ -- Maxwell <maxwell@blueberrypieos.com>  Fri, 27 Nov 2026 20:35:00 +0000
+
 zfsroot (4) blueberry-pie-os; urgency=medium
 
   * First boot keeps the card's last MiB out of the partition it grows. On

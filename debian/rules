@@ -11,7 +11,7 @@ $(OBJ)/%.o: $(SRCROOT)/libexec/%.c
 $(OBJ)/%: $(OBJ)/%.o
 	$(CC) $(BASE_LDFLAGS) $< -o $@
 
-install: $(OBJ)/pie-userreboot $(OBJ)/pie-mount $(OBJ)/pie-dpkg-lock $(OBJ)/pie-grow-partition
+install: check $(OBJ)/pie-userreboot $(OBJ)/pie-mount $(OBJ)/pie-dpkg-lock $(OBJ)/pie-grow-partition $(OBJ)/pie-data-directories
 	install -d $(ROOT)/usr/sbin $(ROOT)/usr/libexec $(ROOT)/etc/dpkg/dpkg.cfg.d \
 		$(ROOT)/etc/apt/apt.conf.d $(ROOT)/usr/lib/blueberry-pie-os/apt \
 		$(ROOT)/usr/lib/blueberry-pie-os/data.d $(ROOT)/usr/local \
@@ -20,12 +20,21 @@ install: $(OBJ)/pie-userreboot $(OBJ)/pie-mount $(OBJ)/pie-dpkg-lock $(OBJ)/pie-
 	install -m 755 sbin/softreboot sbin/pie-seal sbin/pie-boot sbin/pie-data $(ROOT)/usr/sbin/
 	ln -s pie-seal $(ROOT)/usr/sbin/pie-unseal
 	ln -s ../libexec/pie-stage $(ROOT)/usr/sbin/pie-stage
-	install -m 755 libexec/pie-root-setup libexec/pie-data-setup libexec/pie-stage \
-		$(OBJ)/pie-userreboot $(OBJ)/pie-mount $(OBJ)/pie-dpkg-lock $(OBJ)/pie-grow-partition \
+	install -m 755 libexec/pie-root-setup libexec/pie-data-setup libexec/pie-data-directory-legacy libexec/pie-stage \
+		$(OBJ)/pie-userreboot $(OBJ)/pie-mount $(OBJ)/pie-dpkg-lock $(OBJ)/pie-grow-partition $(OBJ)/pie-data-directories \
 		$(ROOT)/usr/libexec/
 	install -m 644 libexec/pie-zfsroot.sh $(ROOT)/usr/libexec/
 	install -m 644 etc/dpkg/dpkg.cfg.d/pie-data $(ROOT)/etc/dpkg/dpkg.cfg.d/
 	install -m 644 etc/apt/apt.conf.d/50pie-root $(ROOT)/etc/apt/apt.conf.d/
 	install -D -m 755 debian/preinst $(ROOT)/DEBIAN/preinst
 
-.PHONY: install
+check:
+	@mkdir -p $(OBJ)
+	/usr/bin/cc -std=c11 -O2 -Wall -Wextra -Werror '-DPIE_DATA_COMPAT="$(CURDIR)/libexec/pie-data-directory-legacy"' libexec/pie-data-directories.c -o $(OBJ)/host-data-directories
+	sh tests/data-setup.sh .
+	PIE_TEST_DIRECTORIES=$(OBJ)/host-data-directories sh tests/data-actions.sh .
+	python3 tests/native-directories.py $(OBJ)/host-data-directories .
+	/usr/bin/cc -std=c11 -O2 -Wall -Wextra -Werror '-DPIE_DATA_COMPAT="$(OBJ)/compat-recorder"' libexec/pie-data-directories.c -o $(OBJ)/dispatch-directories
+	sh tests/id-dispatch.sh $(OBJ)/dispatch-directories $(OBJ)/compat-recorder
+
+.PHONY: install check

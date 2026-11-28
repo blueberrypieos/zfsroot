@@ -15,12 +15,16 @@
 #
 # set makes ROOT the root of the next soft reboot or, if its kernel set
 # differs from the running kernel's, of the next reboot: it updates the
-# boot partition from ROOT and makes it the bootfs. set with the running
-# root makes it the bootfs again, with its kernel on the boot partition.
+# boot partition from ROOT and makes it the bootfs. A ROOT with changes
+# not committed has its kernel set recorded again first; set refuses the
+# stage while it holds such changes. set with the running root makes it
+# the bootfs again, with its kernel on the boot partition, and drops a
+# stage that was the bootfs or is read-only.
 #
 # rollback goes back to the root as it was before the last apt run on a
-# read-write root (ROOT@pre-TIME), or to the root the running root came
-# from (its pie:parent) on a sealed one, or to the ROOT or SNAPSHOT given.
+# read-write root (ROOT@pre-TIME-BOOT), or to the root the running root
+# came from (its pie:parent) on a sealed one, or to the ROOT or SNAPSHOT
+# given.
 # A snapshot becomes a new root. Then it runs softreboot, or says to
 # reboot; -n only sets the root.
 #
@@ -58,14 +62,37 @@ is_root() {
 
 set_root() {
 	r=$1
-	ks=$(prop pie:kernelset "$r")
+	ks=$(rootset "$r")
 	if [ "$r" = "$root" ]; then
+		if ! sealed "$r" || ! valid "$ks"; then
+			ks=$(kernelset /) && [ -n "$ks" ] && record "$r" "$ks" ||
+				die "cannot record $r's kernel set"
+		fi
+		stage=$(pprop pie:stage "$pool")
+		[ -n "$stage" ] && [ "$stage" != "$r" ] &&
+			{ [ "$stage" = "$(pprop bootfs "$pool")" ] || [ "$(prop readonly "$stage")" = on ]; } || stage=
 		if [ "$ks" != "$(pprop pie:bootkernel "$pool")" ]; then
-			boot_from "$pool" "" "$ks" || die "cannot put $r's kernel on the boot partition"
+			boot_from "$pool" "" "$ks" || die "cannot put $r's boot files on the boot partition"
+		fi
+		if [ -n "$stage" ]; then
+			umount "$UPDATE" 2>/dev/null || umount -f "$UPDATE" 2>/dev/null
+			zpool set pie:stage= "$pool" || die "cannot drop the stage $stage"
 		fi
 		zpool set bootfs="$r" "$pool" && zpool set pie:next= "$pool" || die "cannot make $r the bootfs"
+		if [ -n "$stage" ]; then
+			zfs destroy -r "$stage" || echo "${0##*/}: $stage stays until pie-boot gc" >&2
+		fi
 		[ "$ks" = "$(coldkernel "$pool")" ]
 		return
+	fi
+	[ "$r" != "$(pprop pie:stage "$pool")" ] || [ "$ks" != dirty ] ||
+		die "$r holds changes not committed; pie-stage commit first"
+	if ! valid "$ks"; then
+		tmp=$(mktemp -d /private/var/tmp/pie-boot.XXXXXX) || die "cannot make a temporary directory"
+		mount_at "$r" "$tmp" ro || { rmdir "$tmp"; die "cannot mount $r"; }
+		ks=$(kernelset "$tmp")
+		umount "$tmp" && rmdir "$tmp"
+		valid "$ks" && record "$r" "$ks" || die "cannot record $r's kernel set"
 	fi
 	if [ "$ks" = "$(coldkernel "$pool")" ]; then
 		zpool set pie:next="$r" "$pool" || die "cannot make $r the next root"
@@ -73,7 +100,10 @@ set_root() {
 	fi
 	tmp=$(mktemp -d /private/var/tmp/pie-boot.XXXXXX) || die "cannot make a temporary directory"
 	mount_at "$r" "$tmp" ro || { rmdir "$tmp"; die "cannot mount $r"; }
-	boot_from "$pool" "$tmp" "$ks"
+	if ! sealed "$r" || ! valid "$ks"; then
+		ks=$(kernelset "$tmp") && [ -n "$ks" ] && record "$r" "$ks"
+	fi &&
+		boot_from "$pool" "$tmp" "$ks"
 	rc=$?
 	umount "$tmp" && rmdir "$tmp"
 	[ $rc = 0 ] || die "cannot update the boot partition from $r"
@@ -93,8 +123,8 @@ status)
 	show bootfs "$(pprop bootfs "$pool")"
 	show next "$(pprop pie:next "$pool")"
 	show stage "$(pprop pie:stage "$pool")"
-	if [ "$(prop pie:kernelset "$root")" != "$(coldkernel "$pool")" ]; then
-		echo "the root has another kernel than the running one; reboot to use it"
+	if [ "$(rootset "$root")" != "$(coldkernel "$pool")" ]; then
+		echo "the root has another kernel or other boot files than the running ones; reboot to use it"
 	fi
 	;;
 list)
@@ -121,9 +151,9 @@ set)
 			echo "${0##*/}: $r is the next root; softreboot to use it"
 		fi
 	elif [ "$r" = "$root" ]; then
-		echo "${0##*/}: $r is the bootfs; it has another kernel than the running one, so reboot to use it"
+		echo "${0##*/}: $r is the bootfs; it has another kernel or other boot files than the running ones, so reboot to use it"
 	else
-		echo "${0##*/}: $r has another kernel; reboot to use it"
+		echo "${0##*/}: $r has another kernel or other boot files; reboot to use it"
 	fi
 	;;
 rollback)
@@ -152,7 +182,7 @@ rollback)
 		echo "${0##*/}: rolling back to $r"
 		[ -n "$now" ] && exec /usr/sbin/softreboot -r "$r"
 	else
-		echo "${0##*/}: $r has another kernel; reboot to roll back"
+		echo "${0##*/}: $r has another kernel or other boot files; reboot to roll back"
 	fi
 	exit 0
 	;;

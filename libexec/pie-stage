@@ -7,16 +7,19 @@
 #        pie-stage run COMMAND [ARGUMENT ...]
 #
 # pre and post are apt's hooks around each dpkg run. On a read-write
-# root, pre snapshots the root as ROOT@pre-TIME if it changed since its
-# last snapshot, for pie-boot rollback, and post records the root's kernel
-# set. On a sealed root, dpkg installs into the stage on
-# /System/Volumes/Update, and post commits it.
+# root, pre snapshots the root as ROOT@pre-TIME-BOOT if it changed since
+# its last snapshot, for pie-boot rollback, and post records the root's
+# kernel set. pre refuses unless the root is the pool's bootfs. It marks
+# the boot partition and the root's kernel set as being changed, and post
+# updates the boot partition from the root. On a sealed root, dpkg
+# installs into the stage on /System/Volumes/Update, pre marks the stage's
+# kernel set as being changed, and post commits it.
 #
 # commit makes the stage the root for the next soft reboot. If its kernel
 # set differs from the running kernel's, it updates the boot partition from
 # the stage and makes the stage the pool's bootfs, for the next reboot.
 # post does not commit a stage in which dpkg left packages unfinished, and
-# pre refuses while the stage holds a new kernel.
+# pre refuses while the stage holds a new kernel or boot files.
 #
 # run runs COMMAND with the stage as its root directory, then commits it:
 # pie-stage run vi /etc/hostname.
@@ -51,7 +54,7 @@ commit() {
 			die "cannot update the boot partition from $stage; nothing switched"
 		zfs set readonly=on "$stage" && zpool set bootfs="$stage" "$pool" &&
 			zpool set pie:next="$stage" "$pool" || die "cannot make $stage the bootfs"
-		echo "${0##*/}: $stage has a new kernel; reboot to use it"
+		echo "${0##*/}: $stage has a new kernel or boot files; reboot to use it"
 	else
 		zpool set pie:next="$stage" "$pool" || die "cannot make $stage the next root"
 		echo "${0##*/}: $stage is staged; softreboot to use it"
@@ -61,7 +64,9 @@ commit() {
 
 dirty() {
 	stage=$(pprop pie:stage "$pool")
-	[ -n "$stage" ] && zfs set pie:dirty=on "$stage" || die "cannot mark the stage as changed"
+	[ -n "$stage" ] && zfs set pie:dirty=on "$stage" && m=$(changing "$stage") &&
+		zfs set pie:kernelset="$m" "$stage" ||
+		die "cannot mark the stage as changed"
 }
 
 case ${1:-} in
@@ -69,19 +74,26 @@ pre)
 	if sealed "$root"; then
 		stage_mounted || die "there is no stage on $UPDATE; reboot or softreboot first"
 		stage=$(pprop pie:stage "$pool")
-		if [ "$(prop readonly "$stage")" = on ] || [ "$stage" = "$(pprop bootfs "$pool")" ]; then
-			die "the stage $stage has a new kernel; reboot to use it first"
+		if [ "$stage" = "$(pprop bootfs "$pool")" ]; then
+			die "the stage $stage has a new kernel or boot files; reboot to use it, or pie-boot set $root drops it"
 		fi
+		[ "$(prop readonly "$stage")" != on ] ||
+			die "the stage $stage is read-only; pie-stage commit finishes it, or pie-boot set $root drops it"
 		dirty
 	else
 		next=$(pprop pie:next "$pool")
 		if [ -n "$next" ] && [ "$next" != "$root" ]; then
 			die "$next is the next root, and changes to $root would not reach it; softreboot first, or pie-boot set $root"
 		fi
+		[ "$root" = "$(pprop bootfs "$pool")" ] ||
+			die "$root is not the bootfs, and its boot files would not reach the boot partition; pie-boot set $root first"
 		if [ "$(prop written "$root")" != 0 ] ||
 			[ -z "$(zfs list -H -o name -t snapshot -d 1 "$root" 2>/dev/null)" ]; then
-			zfs snapshot "$root@pre-$(stamp)" || die "cannot snapshot $root"
+			zfs snapshot "$root@$(snapname pre)" || die "cannot snapshot $root"
 		fi
+		zpool set pie:bootkernel=pending "$pool" && m=$(changing "$root") &&
+			zfs set pie:kernelset="$m" "$root" ||
+			die "cannot mark the boot partition and $root as being changed"
 	fi
 	;;
 post)
@@ -94,7 +106,7 @@ post)
 		ks=$(kernelset /)
 		[ -n "$ks" ] && zfs set pie:kernelset="$ks" "$root" || die "cannot record the root's kernel set"
 		if [ "$root" = "$(pprop bootfs "$pool")" ] && [ "$ks" != "$(pprop pie:bootkernel "$pool")" ]; then
-			boot_from "$pool" "" "$ks" || die "cannot put $root's kernel on the boot partition"
+			boot_from "$pool" "" "$ks" || die "cannot put $root's boot files on the boot partition"
 		fi
 	fi
 	;;

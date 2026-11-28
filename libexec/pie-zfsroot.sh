@@ -67,6 +67,30 @@ stamp() {
 	date -u +%Y%m%dT%H%M%SZ
 }
 
+snapname() {
+	b=$(bootid)
+	echo "$1-$(stamp)${b:+-$b}"
+}
+
+rootset() {
+	if [ "$(prop pie:dirty "$1")" = on ]; then
+		echo dirty
+	else
+		prop pie:kernelset "$1"
+	fi
+}
+
+record() {
+	zfs set pie:kernelset="$2" "$1" && zfs inherit pie:dirty "$1"
+}
+
+changing() {
+	g=$(prop guid "$1") && b=$(bootid) && t=$(stamp) || return 1
+	case $g in ""|-|*[!0-9]*) return 1 ;; esac
+	[ -n "$b" ] && [ -n "$t" ] || return 1
+	echo "changing-$g-$b-$$-$t"
+}
+
 next_root() {
 	n=$(zfs list -H -o name -d 1 -t filesystem "$1/root" 2>/dev/null |
 		sed -n "s|^$1/root/\([0-9][0-9]*\)$|\1|p" | sort -n | tail -n 1)
@@ -92,13 +116,20 @@ bootid() {
 	sysctl -n kern.bootsessionuuid 2>/dev/null
 }
 
+valid() {
+	[ ${#1} = 64 ] && case $1 in *[!0-9a-f]*) false ;; esac
+}
+
 coldkernel() {
 	bt=$(bootid)
-	[ -n "$bt" ] && [ "$(pprop pie:coldboot "$1")" = "$bt" ] && pprop pie:coldkernel "$1"
+	[ -n "$bt" ] && [ "$(pprop pie:coldboot "$1")" = "$bt" ] || return 0
+	k=$(pprop pie:coldkernel "$1")
+	! valid "$k" || echo "$k"
 }
 
 boot_from() {
-	/usr/libexec/blueberry-pie-os-update-boot --from "$2/usr/lib/blueberry-pie-os/boot" &&
+	zpool set pie:bootkernel=pending "$1" &&
+		/usr/libexec/blueberry-pie-os-update-boot --from "$2/usr/lib/blueberry-pie-os/boot" &&
 		zpool set pie:bootkernel="$3" "$1"
 }
 

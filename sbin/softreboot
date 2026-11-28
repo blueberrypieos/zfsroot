@@ -8,9 +8,12 @@
 # also switch the root to ROOT, by default the pool's pie:next (a staged,
 # sealed, unsealed or rolled-back root) or else the running root, and the
 # data set to POOL/data/DATA. A root whose kernel set differs from the
-# running kernel's needs a reboot instead. A new root that fails to boot
-# to the end of /etc/rc gives way to the pool's bootfs again. A data set
-# that cannot be mounted gives way to the one that ran before.
+# running kernel's needs a reboot instead. The kernel set covers the
+# kernel, its extensions and the boot files. softreboot refuses while an
+# update of the boot partition has not finished, and for a root whose
+# changes are not committed. A new root that fails to boot to the end of
+# /etc/rc gives way to the pool's bootfs again. A data set that cannot be
+# mounted gives way to the one that ran before.
 
 . /usr/libexec/pie-zfsroot.sh
 
@@ -42,10 +45,16 @@ case $target in
 "$pool"/root/*) exists "$target" || die "no root $target" ;;
 *) die "$target is not a root of $pool" ;;
 esac
+[ "$target" != "$(pprop pie:stage "$pool")" ] || [ "$(prop pie:dirty "$target")" != on ] ||
+	die "$target holds changes not committed; pie-stage commit first"
 cold=$(coldkernel "$pool")
 [ -n "$cold" ] || die "the running kernel is not recorded; reboot"
-[ "$(prop pie:kernelset "$target")" = "$cold" ] ||
-	die "$target has another kernel than the running one; make it the root with pie-boot set, then reboot"
+[ "$(pprop pie:bootkernel "$pool")" != pending ] ||
+	die "an update of the boot partition did not finish; pie-boot set $root finishes it, or reboot"
+valid "$(rootset "$target")" ||
+	die "$target's kernel set is not known; pie-boot set $target records it"
+[ "$(rootset "$target")" = "$cold" ] ||
+	die "$target has another kernel or other boot files than the running ones; make it the root with pie-boot set, then reboot"
 if [ "$target" != "$root" ]; then
 	if sealed "$target"; then
 		zfs set readonly=on "$target"

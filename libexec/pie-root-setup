@@ -17,7 +17,12 @@
 # be mounted, or if the data set cannot be set up. After a soft reboot
 # onto another root, STATUS 0 makes that root the pool's bootfs, with its
 # kernel on the boot partition; any other status goes back to the bootfs
-# with softreboot, or with a reboot if softreboot cannot run.
+# with softreboot, or with a reboot if softreboot cannot run. At a reboot,
+# if the boot partition may not hold the root's boot files, it updates the
+# boot partition from the root once /etc/rc exits. It does not if the root
+# is no longer the bootfs then. softreboot refuses until the next reboot.
+# While apt or dpkg runs, the update is left to apt's post or the next
+# reboot.
 
 . /usr/libexec/pie-zfsroot.sh
 
@@ -79,13 +84,28 @@ unmount_data() {
 		done
 }
 
+repair() {
+	zpool set pie:coldboot= "$pool"
+	why="was being changed when the system stopped"
+	! valid "$1" || why="held another root's boot files"
+	ks=$2
+	if ! sealed "$root" || ! valid "$ks"; then
+		ks=$(kernelset /) && [ -n "$ks" ] && record "$root" "$ks" || ks=
+	fi
+	if valid "$ks" && boot_from "$pool" "" "$ks"; then
+		echo "${0##*/}: the boot partition $why; it now holds $root's boot files; reboot to run its kernel" >&2
+	else
+		echo "${0##*/}: the boot partition $why, and cannot be updated from $root; the next boot tries again" >&2
+	fi
+}
+
 ensure_stage() {
 	stage=$(pprop pie:stage "$pool")
 	if [ -n "$stage" ] && [ "$stage" != "$root" ] && exists "$stage" &&
 		case $(prop origin "$stage") in "$root"@*) true ;; *) false ;; esac; then
 		:
 	else
-		snap=$root@stage-$(stamp)
+		snap=$root@$(snapname stage)
 		stage=$(next_root "$pool")
 		zfs snapshot "$snap" && make_root "$snap" "$stage" on &&
 			zpool set pie:stage="$stage" "$pool" || {
@@ -124,10 +144,19 @@ boot|softboot)
 		ensure_stage
 	fi
 	if [ "$1" = boot ]; then
+		ks=$(rootset "$root")
+		if [ "$ks" = dirty ] && sealed "$root"; then
+			ks=$(kernelset /) && [ -n "$ks" ] && record "$root" "$ks" || ks=dirty
+		fi
 		bk=$(pprop pie:bootkernel "$pool")
 		if [ -z "$bk" ]; then
-			bk=$(prop pie:kernelset "$root")
+			bk=$ks
 			zpool set pie:bootkernel="$bk" "$pool"
+		fi
+		if ! valid "$bk" || [ "$bk" != "$ks" ]; then
+			zpool set pie:coldboot= "$pool"
+			echo "${0##*/}: the boot partition may not hold $root's boot files; it is updated once /etc/rc exits" >&2
+			exit 0
 		fi
 		bt=$(bootid)
 		if [ -z "$bt" ] || ! zpool set pie:coldkernel="$bk" "$pool" ||
@@ -136,19 +165,33 @@ boot|softboot)
 			echo "${0##*/}: cannot record the running kernel; softreboot refuses until a reboot" >&2
 			exit 1
 		fi
-		[ "$bk" = "$(prop pie:kernelset "$root")" ] ||
-			echo "${0##*/}: the boot partition's kernel is not $root's; pie-boot set $root puts $root's there" >&2
 	fi
 	;;
 rc)
+	if [ "${3:-}" = boot ]; then
+		bt=$(bootid)
+		[ -z "$bt" ] || [ "$(pprop pie:coldboot "$pool")" != "$bt" ] || exit 0
+		[ "$root" = "$(pprop bootfs "$pool")" ] || exit 0
+		ks=$(rootset "$root")
+		bk=$(pprop pie:bootkernel "$pool")
+		if [ -n "$bk" ] && { ! valid "$bk" || [ "$bk" != "$ks" ]; }; then
+			exclusive "$0" "$@"
+			repair "$bk" "$ks"
+		fi
+		exit 0
+	fi
 	[ "${3:-}" = softboot ] || exit 0
 	[ "${2:-}" = 0 ] && serialize "$0" "$@"
 	bootfs=$(pprop bootfs "$pool")
 	[ "$root" != "$bootfs" ] || exit 0
 	if [ "${2:-}" = 0 ]; then
-		ks=$(prop pie:kernelset "$root")
+		ks=$(rootset "$root")
+		if ! valid "$ks"; then
+			echo "${0##*/}: $root's kernel set is not recorded; a reboot starts $bootfs" >&2
+			exit 1
+		fi
 		if [ "$ks" != "$(pprop pie:bootkernel "$pool")" ] && ! boot_from "$pool" "" "$ks"; then
-			echo "${0##*/}: cannot put $root's kernel on the boot partition; a reboot starts $bootfs" >&2
+			echo "${0##*/}: cannot put $root's boot files on the boot partition; a reboot starts $bootfs" >&2
 			exit 1
 		fi
 		zpool set bootfs="$root" "$pool" || exit 1

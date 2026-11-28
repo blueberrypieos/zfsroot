@@ -39,14 +39,14 @@ fi
 
 stage=$(pprop pie:stage "$pool")
 if [ $want = off ] && [ -n "$stage" ] && [ "$stage" = "$(pprop bootfs "$pool")" ]; then
-	die "the stage $stage has a new kernel and is the bootfs; reboot to use it, or pie-boot set $root to drop it"
+	die "the stage $stage has a new kernel or boot files and is the bootfs; reboot to use it, or pie-boot set $root to drop it"
 fi
 if [ $want = off ] && [ -n "$stage" ] && exists "$stage" && [ -z "$force" ] &&
 	{ [ "$next" = "$stage" ] || [ "$(prop pie:dirty "$stage")" = on ]; }; then
 	die "the stage $stage holds changes not yet booted; softreboot first, or pie-unseal -f to drop them"
 fi
 
-snap=$root@$( [ $want = on ] && echo seal || echo unseal )-$(stamp)
+snap=$root@$(snapname "$( [ $want = on ] && echo seal || echo unseal )")
 new=$(next_root "$pool")
 zfs snapshot "$snap" || die "cannot snapshot $root"
 make_root "$snap" "$new" $want || die "cannot make $new from $snap"

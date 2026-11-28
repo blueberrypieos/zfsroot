@@ -1,0 +1,21 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 The Blueberry Pie OS Authors
+# usage: pie-data-directory-legacy ROOT OVERRIDES LABEL PATH
+dir=$1
+overrides=$2
+label=$3
+p=$4
+o=$(awk -v p="$p" '$4 == p { print $1, $2, $3; exit }' "$overrides" 2>/dev/null)
+if [ ! -d "$dir$p" ]; then
+	if [ -e "$dir$p" ] || ! mkdir -p "$dir$p"; then
+		echo "$label: cannot make $dir$p" >&2
+		exit 1
+	fi
+	[ -n "$o" ] || { chown 0:0 "$dir$p" && chmod 0755 "$dir$p"; } || exit 1
+fi
+if [ -n "$o" ]; then
+	set -- $o
+	chown "${1#\#}:${2#\#}" "$dir$p" && chmod "$3" "$dir$p" || exit 1
+fi
+exit 0
